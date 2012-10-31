@@ -1,7 +1,7 @@
 include ../../Makefile.config
 
 CC=g++
-CFLAGS=-c -Wall -I $(THRIFT_DIR)/include/thrift -I $(THRIFT_DIR)/include
+CFLAGS=-c -Wall -I $(THRIFT_DIR)/include/thrift -I $(THRIFT_DIR)/include -DHAVE_INTTYPES_H -DHAVE_NETINET_IN_H
 LDFLAGS = -L$(THRIFT_DIR)/lib -lthrift
 SOURCES = mapkeeper_constants.cpp \
           MapKeeper.cpp \

@@ -76,6 +76,14 @@ http://mysql.com/
 
 [MySQL Licensing Policy](http://www.mysql.com/about/legal/licensing/index.html)
 
+### WiredTiger
+
+WiredTiger is a key-value store library.
+
+http://wiredtiger.com
+
+[GNU GPL 3](http://source.wiredtiger.com/license.html)
+
 ### YCSB
 
 YCSB is a framework and common set of workloads for evaluating the performance
