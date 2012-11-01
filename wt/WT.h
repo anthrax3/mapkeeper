@@ -4,8 +4,32 @@
 #ifndef WT_H
 #define WT_H
 
+#include <map>
 #include <wiredtiger.h>
 #include "MapKeeper.h"
+
+#define ERROR_RET_PRINT(ret_, rc_, ...) do {    \
+    fprintf(stderr, __VA_ARGS__);               \
+    if (rc_ != 0)                               \
+        fprintf(stderr, "%s\n", wiredtiger_strerror(rc_));  \
+    else                                        \
+        fprintf(stderr, "\n");                  \
+} while(0)
+#define ERROR_RET(ret_, rc_, ...) do {          \
+    ERROR_RET_PRINT(ret_, rc_, __VA_ARGS__);    \
+    return (ret_);                              \
+} while (0)
+#define ERROR_RET_VOID(rc_, ...) do {          \
+    ERROR_RET_PRINT(0, rc_, __VA_ARGS__);      \
+    return;                                    \
+} while (0)
+#define ERROR_GOTO(ret_, rc_, ...) do {         \
+    ERROR_RET_PRINT(ret_, rc_, __VA_ARGS__);    \
+    ret = ret_;                                 \
+    goto error;                                 \
+} while (0)
+
+using namespace std;
 
 class WT {
 public:
@@ -19,7 +43,7 @@ public:
         ScanEnded
     };
 
-    WT();
+    WT(WT_CONNECTION *conn, const string& tableType);
 
     /**
      * Destructor. It'll close the database if it's open.
@@ -32,10 +56,7 @@ public:
      * @returns Success on success
      *          DbExists if the database already exists.
      */
-    ResponseCode create(WT_CONNECTION *conn, 
-                      const std::string& databaseName,
-                      uint32_t pageSizeKb,
-                      uint32_t numRetries);
+    ResponseCode create(const string& tableName, uint32_t pageSizeKb);
 
     /**
      * Opens a database.
@@ -43,40 +64,46 @@ public:
      * @returns Success on success
      *          DbNotFound if the database doesn't exist.
      */
-    ResponseCode open(WT_CONNECTION *conn, 
-                      const std::string& databaseName,
-                      uint32_t pageSizeKb,
-                      uint32_t numRetries);
+    ResponseCode open(const string& tableName);
+
+    ResponseCode listTables(mapkeeper::StringListResponse& _return);
 
     ResponseCode close();
-    ResponseCode drop();
-    ResponseCode get(const std::string& key, std::string& value);
-    ResponseCode insert(const std::string& key, const std::string& value);
-    ResponseCode update(const std::string& key, const std::string& value);
-    ResponseCode remove(const std::string& key);
+    ResponseCode drop(const string& tableName);
+    ResponseCode get(const string& tableName,
+            const string& key, string& value);
+    ResponseCode insert(const string& tableName,
+            const string& key, const string& value);
+    ResponseCode update(const string& tableName,
+            const string& key, const string& value);
+    ResponseCode remove(const string& tableName,
+            const string& key);
     WT_SESSION* getSession();
 
     /* APIs for iteration. */
-    ResponseCode scanStart(const mapkeeper::ScanOrder::type order,
-            const std::string& startKey, const bool startKeyIncluded,
-            const std::string& endKey, const bool endKeyIncluded);
+    ResponseCode scanStart(const string& tableName,
+            const mapkeeper::ScanOrder::type order,
+            const string& startKey, const bool startKeyIncluded,
+            const string& endKey, const bool endKeyIncluded);
     ResponseCode scanNext(mapkeeper::Record &rec);
     ResponseCode scanEnd();
 
 private:
+    const string Name2Uri(const string& tableName);
+    ResponseCode openCursor(const string& tableName);
+    void closeCursor();
+
     WT_CONNECTION *conn_;
     WT_SESSION *sess_;
+    map<string, WT_CURSOR *> cursors_;
     WT_CURSOR *curs_;
-    std::string uri_;
-    std::string dbName_;
-    bool inited_;
-    uint32_t numRetries_;
+    const string tableType_;
     /* Variables tracking a scan (iteration). */
     bool scanning_;
     bool scanSetup_;
     mapkeeper::ScanOrder::type order_;
-    std::string startKey_;
-    std::string endKey_;
+    string startKey_;
+    string endKey_;
     bool startKeyIncluded_;
     bool endKeyIncluded_;
 };

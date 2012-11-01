@@ -9,14 +9,56 @@
 #include "WT.h"
 
 using namespace mapkeeper;
+using namespace std;
+
+const string WT::Name2Uri(const string& tableName)
+{
+    string uri(tableType_);
+    uri.append(tableName);
+    return uri;
+}
+
+WT::ResponseCode WT::
+openCursor(const string& tableName)
+{
+    if (curs_ != NULL)
+        ERROR_RET(Error, 0,
+            "Cannot execute operations in parallel.\n");
+
+    map<string, WT_CURSOR *>::iterator itr =
+        cursors_.find(tableName);
+    if (itr != cursors_.end()) {
+        curs_ = itr->second;
+        return Success;
+    }
+    /* We don't have a cached cursor, open one and add it to the cache. */
+    WT_CURSOR *curs;
+    int rc = sess_->open_cursor(
+        sess_, Name2Uri(tableName).c_str(), NULL, NULL, &curs);
+    if (rc != 0)
+        ERROR_RET(Error, rc, "Error opening cursor.\n");
+    cursors_[tableName] = curs;
+    curs_ = curs;
+    return Success;
+}
+
+void WT::closeCursor()
+{
+    curs_->reset(curs_);
+    curs_ = NULL;
+}
 
 WT::
-WT() :
-    conn_(NULL),
-    sess_(NULL),
-    dbName_(""), 
-    inited_(false)
+WT(WT_CONNECTION *conn, const string& tableType) :
+    conn_(conn),
+    curs_(NULL),
+    tableType_(tableType)
 {
+    /* TODO: Add WT event handler. */
+    WT_SESSION *sess;
+    assert(0 == conn_->open_session(conn_, NULL, NULL, &sess));
+    sess_ = sess;
+    printf("Creating new WT object.\n");
 }
 
 WT::
@@ -26,251 +68,187 @@ WT::
 }
 
 WT::ResponseCode WT::
-create(WT_CONNECTION *conn, 
-     const std::string& databaseName,
-     uint32_t pageSizeKb,
-     uint32_t numRetries)
+create(const string& tableName, uint32_t pageSizeKb)
 {
-    if (inited_) {
-        fprintf(stderr, "Tried to open db %s but %s is already open",
-            databaseName.c_str(), dbName_.c_str());
-        return Error;
-    }
-    conn_ = conn;
-    numRetries_ = numRetries;
-    /* TODO: Add WT event handler. */
-    if (sess_ == NULL) {
-        WT_SESSION *sess;
-        assert(0 == conn_->open_session(conn_, NULL, NULL, &sess));
-        sess_ = sess;
-    }
-    std::stringstream config;
+    stringstream config;
     config.str("");
     /* TODO: Exclusive create? */
     config << "key_format=S,value_format=S";
     config << ",internal_page_max=" << pageSizeKb * 1024;
     config << ",leaf_page_max=" << pageSizeKb * 1024;
-    std::stringstream uri;
-    uri.str("");
-    uri << "lsm:" << databaseName;
-    int rc = sess_->create(sess_, uri.str().c_str(), config.str().c_str());
-    if (rc == EEXIST) {
+    config << ",lsm_chunk_size=20MB";
+    int rc = sess_->create(
+            sess_, Name2Uri(tableName).c_str(), config.str().c_str());
+    if (rc == EEXIST)
         return DbExists;
-    } else if (rc != 0) {
+    else if (rc != 0)
         // unexpected error
-        fprintf(stderr, "WT_SESSION::create() returned: %s",
-                wiredtiger_strerror(rc));
-        return Error;
-    }
-    WT_CURSOR *curs;
-    assert(0 == sess_->open_cursor(
-                sess_, uri.str().c_str(), NULL, NULL, &curs));
-    curs_ = curs;
-
-    dbName_ = databaseName;
-    uri_ = uri.str();
-    inited_ = true;
+        ERROR_RET(Error, rc, "WT_SESSION::create() failed.");
     return Success;
 }
 
 WT::ResponseCode WT::
-open(WT_CONNECTION *conn, 
-     const std::string& databaseName,
-     uint32_t pageSizeKb,
-     uint32_t numRetries)
+open(const string& tableName)
 {
-    if (inited_) {
-        fprintf(stderr, "Tried to open db %s but %s is already open",
-                databaseName.c_str(), dbName_.c_str());
-        return Error;
-    }
-    conn_ = conn;
-    numRetries_ = numRetries;
-    /* TODO: Add WT event handler. */
-    if (sess_ == NULL) {
-        WT_SESSION *sess;
-        assert(0 == conn_->open_session(conn_, NULL, NULL, &sess));
-        sess_ = sess;
-    }
     /* TODO: Check for existence? */
-    std::stringstream uri;
-    uri.str("");
-    uri << "lsm:" << databaseName;
-    uri_ = uri.str();
-    WT_CURSOR *curs;
-    assert(0 == sess_->open_cursor(
-                sess_, uri.str().c_str(), NULL, NULL, &curs));
-    curs_ = curs;
-    dbName_ = databaseName;
-    inited_ = true;
     return Success;
+}
+
+#define WT_METADATA_URI "file:WiredTiger.wt"
+WT::ResponseCode WT::
+listTables(StringListResponse &_return)
+{
+    WT_CURSOR *cursor;
+    ResponseCode ret = Success;
+    int rc = 0;
+    _return.values.clear();
+    /* Open the metadata file. */
+    if ((rc = sess_->open_cursor(
+        sess_, WT_METADATA_URI, NULL, NULL, &cursor)) != 0) {
+        // If there is no metadata treat it the same as an empty metadata.
+        if (ret == ENOENT)
+            return Success;
+
+        _return.responseCode = mapkeeper::ResponseCode::Error;
+        ERROR_RET(Error, rc, "WT::listMaps cursor open");
+    }
+
+    const char *key;
+    while ((rc = cursor->next(cursor)) == 0) {
+        /* Get the key. */
+        if ((rc = cursor->get_key(cursor, &key)) != 0)
+            ERROR_GOTO(Error, rc, "WT::listMaps metadata get.");
+
+        _return.values.push_back(string(key));
+    }
+error:
+    cursor->close(cursor);
+    if (ret != Success)
+        _return.responseCode = mapkeeper::ResponseCode::Error;
+    return ret;
 }
 
 WT::ResponseCode WT::
 close()
 {
     printf("Closing WT object\n");
-    if (!inited_) {
-        return Error;
-    }
-    int rc = curs_->close(curs_);
+    /* No need to go through and close the cursors - session close does it. */
+    if (sess_ == NULL)
+        return Success; /* It's already closed. */
+    int rc = sess_->close(sess_, NULL);
     if (rc != 0)
-        /* Report errors but keep going. */
-        fprintf(stderr, "WT_CURSOR::close error %s\n", wiredtiger_strerror(rc));
-    rc = sess_->close(sess_, NULL);
-    if (rc == WT_DEADLOCK) {
-        fprintf(stderr, "Txn aborted to avoid deadlock: %s",
-                wiredtiger_strerror(rc));
-        return Error;
-    } else if (rc != 0) {
-        // unexpected error
-        fprintf(stderr, "WT_SESSION::close() returned: %s",
-                wiredtiger_strerror(rc));
-        return Error;
-    }
-    curs_ = NULL;
+        ERROR_RET(Error, 0, "WT_SESSION::close() failed.");
     sess_ = NULL;
-    inited_ = false;
+    curs_ = NULL;
     return Success;
 }
 
 WT::ResponseCode WT::
-drop()
+drop(const string& tableName)
 {
-    curs_->close(curs_);
-    int rc = sess_->drop(sess_, uri_.c_str(), NULL);
-    if (rc == ENOENT) {
-    } else if (rc == WT_DEADLOCK) {
-        fprintf(stderr, "Txn aborted to avoid deadlock: %s",
-                wiredtiger_strerror(rc));
-        return Error;
-    } else if (rc != 0) {
-        fprintf(stderr, "WT_SESSION::drop() returned: %s",
-                wiredtiger_strerror(rc));
-        return Error;
-    }
-    ResponseCode returnCode = close();
-    if (returnCode != 0) {
-        return returnCode;
-    }
+    int rc = sess_->drop(sess_, Name2Uri(tableName).c_str(), NULL);
+    if (rc != 0 && rc != ENOENT)
+        ERROR_RET(Error, rc, "WT_SESSION::drop() failed.");
     return Success;
 }
 
 WT::ResponseCode WT::
-get(const std::string& key, std::string& value)
+get(const string& tableName, const string& key, string& value)
 {
-    if (!inited_) {
-        fprintf(stderr, "get called on uninitialized database");
-        return Error;
-    }
-
+    ResponseCode ret = Success;
     int rc = 0;
-    for (uint32_t idx = 0; idx < numRetries_; idx++) {
-        curs_->set_key(curs_, key.c_str());
-        rc = curs_->search(curs_);
-        if (rc == 0) {
-            const char *val;
-            curs_->get_value(curs_, &val);
-            value.assign(val);
-            curs_->reset(curs_);
-            return Success;
-        } else if (rc == WT_NOTFOUND) {
-            return KeyNotFound;
-        } else if (rc != WT_DEADLOCK) {
-            fprintf(stderr, "WT_CURSOR::search() returned: %s",
-                    wiredtiger_strerror(rc));
-            return Error;
-        } 
-    }
-    fprintf(stderr, "get failed %d times", numRetries_);
-    return Error;
+    if ((ret = openCursor(tableName)) != Success)
+        ERROR_RET(ret, 0, "WT::get failed to open cursor\n");
+
+    curs_->set_key(curs_, key.c_str());
+    rc = curs_->search(curs_);
+    if (rc == 0) {
+        const char *val;
+        curs_->get_value(curs_, &val);
+        value.assign(val);
+        curs_->reset(curs_);
+        ret = Success;
+    } else if (rc == WT_NOTFOUND)
+        ret = KeyNotFound;
+    else
+        ERROR_GOTO(Error, rc, "WT::insert operation failed\n");
+error:
+    closeCursor();
+    return ret;
 }
 
 WT::ResponseCode WT::
-insert(const std::string& key, const std::string& value)
+insert(const string& tableName,
+    const string& key, const string& value)
 {
-    if (!inited_) {
-        fprintf(stderr, "insert called on uninitialized database");
-        return Error;
-    }
-
+    ResponseCode ret = Success;
     int rc = 0;
-    for (uint32_t idx = 0; idx < numRetries_; idx++) {
-        curs_->set_key(curs_, key.c_str());
-        curs_->set_value(curs_, value.c_str());
-        curs_->insert(curs_);
-        if (rc == 0) {
-            return Success;
-        } else if (rc == WT_DUPLICATE_KEY) {
-            return KeyExists;
-        } else if (rc != WT_DEADLOCK) {
-            fprintf(stderr, "WT_CURSOR::insert() returned: %s",
-                    wiredtiger_strerror(rc));
-            return Error;
-        }
-    }
-    fprintf(stderr, "insert failed %d times", numRetries_);
-    return Error;
+    if ((ret = openCursor(tableName)) != Success)
+        ERROR_RET(ret, 0, "WT::insert failed to open cursor\n");
+
+    curs_->set_key(curs_, key.c_str());
+    curs_->set_value(curs_, value.c_str());
+    rc = curs_->insert(curs_);
+    if (rc == WT_DUPLICATE_KEY)
+        ret = KeyExists;
+    else if (rc != 0)
+        ERROR_GOTO(Error, rc, "WT::insert operation failed\n");
+error:
+    closeCursor();
+    return ret;
 }
 
 /**
  * Cursor must be closed before the transaction is aborted/commited.
  */
 WT::ResponseCode WT::
-update(const std::string& key, const std::string& value)
+update(const string& tableName,
+    const string& key, const string& value)
 {
-    if (!inited_) {
-        fprintf(stderr, "insert called on uninitialized database");
-        return Error;
-    }
-
+    ResponseCode ret = Success;
     int rc = 0;
-    for (uint32_t idx = 0; idx < numRetries_; idx++) {
-        curs_->set_key(curs_, key.c_str());
-        curs_->set_value(curs_, value.c_str());
-        curs_->update(curs_);
+    if ((ret = openCursor(tableName)) != Success)
+        ERROR_RET(ret, 0, "WT::update failed to open cursor\n");
 
-        if (rc == 0) {
-            return Success;
-        } else if (rc != WT_DEADLOCK) {
-                fprintf(stderr, "WT_CURSOR::update() returned: %s",
-                        wiredtiger_strerror(rc));
-                return Error;
-        }
-    }
-    fprintf(stderr, "update failed %d times", numRetries_);
-    return Error;
+    curs_->set_key(curs_, key.c_str());
+    curs_->set_value(curs_, value.c_str());
+    rc = curs_->update(curs_);
+
+    if (rc != 0)
+        ERROR_GOTO(Error, rc, "WT::update operation failed\n");
+error:
+    closeCursor();
+    return ret;
 }
 
 WT::ResponseCode WT::
-remove(const std::string& key)
+remove(const string& tableName, const string& key)
 {
-    if (!inited_) {
-        return Error;
-    }
-
+    ResponseCode ret = Success;
     int rc = 0;
-    for (uint32_t idx = 0; idx < numRetries_; idx++) {
-        curs_->set_key(curs_, key.c_str());
-        curs_->remove(curs_);
-        if (rc == 0) {
-            return Success;
-        } else if (rc == WT_NOTFOUND) {
-            return KeyNotFound;
-        } else if (rc != WT_DEADLOCK) {
-            fprintf(stderr, "WT_CURSOR::remove() returned: %s",
-                    wiredtiger_strerror(rc));
-            return Error;
-        }
-    }
-    fprintf(stderr, "update failed %d times", numRetries_);
-    return Error;
+    if ((ret = openCursor(tableName)) != Success)
+        ERROR_RET(ret, 0, "WT::get failed to open cursor\n");
+
+    curs_->set_key(curs_, key.c_str());
+    rc = curs_->remove(curs_);
+    if (rc == WT_NOTFOUND)
+        ret = KeyNotFound;
+    else if (rc != 0)
+        ERROR_GOTO(Error, rc, "WT::remove operation failed\n");
+error:
+    closeCursor();
+    return ret;
 }
 
-WT::ResponseCode WT::scanStart(const ScanOrder::type order,
-        const std::string& startKey, const bool startKeyIncluded,
-        const std::string& endKey, const bool endKeyIncluded)
+WT::ResponseCode WT::scanStart(const string &tableName,
+        const ScanOrder::type order,
+        const string& startKey, const bool startKeyIncluded,
+        const string& endKey, const bool endKeyIncluded)
 {
+    ResponseCode ret = Success;
+    if ((ret = openCursor(tableName)) != Success)
+        ERROR_RET(ret, 0, "WT::scanStart failed to open cursor\n");
+
     scanning_ = true;
     scanSetup_ = false;
     order_ = order;
@@ -285,10 +263,10 @@ WT::ResponseCode WT::scanStart(const ScanOrder::type order,
 
 WT::ResponseCode WT::scanNext(Record &rec)
 {
-    if (!scanning_) {
-        fprintf(stderr, "scanNext called when WT not setup for scan.\n");
-        return Error;
-    }
+    if (!scanning_)
+        ERROR_RET(Error, 0,
+            "WT::scanNext called when WT not setup for scan.\n");
+
     int rc = 0;
     if (!scanSetup_) {
         if (order_ == ScanOrder::Ascending && startKey_.empty())
@@ -320,22 +298,19 @@ WT::ResponseCode WT::scanNext(Record &rec)
         return ScanEnded;
     else if (rc == WT_NOTFOUND)
         return (KeyNotFound);
-    else if (rc != 0) {
-        fprintf(stderr, "scanNext failed with %s\n",
-            wiredtiger_strerror(rc));
-        return Error;
-    }
+    else if (rc != 0)
+        ERROR_RET(Error, rc, "WT::scanNext error.");
     const char *key, *value;
     curs_->get_key(curs_, &key);
     curs_->get_value(curs_, &value);
 
     /* Check for terminating condition. */
     if (order_ == ScanOrder::Ascending) {
-        int exact = std::string(key).compare(endKey_);
+        int exact = string(key).compare(endKey_);
         if ((exact == 0 && !endKeyIncluded_) || exact > 0)
             return ScanEnded;
     } else { /* Descending */
-        int exact = std::string(key).compare(startKey_);
+        int exact = string(key).compare(startKey_);
         if ((exact == 0 && !startKeyIncluded_) || exact < 0)
             return ScanEnded;
     }
@@ -347,7 +322,7 @@ WT::ResponseCode WT::scanNext(Record &rec)
 
 WT::ResponseCode WT::scanEnd()
 {
-    curs_->reset(curs_);
+    closeCursor();
     scanning_ = false;
     scanSetup_ = false;
 
