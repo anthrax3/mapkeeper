@@ -53,4 +53,6 @@ private:
     WT_CONNECTION *conn_;
     boost::thread_specific_ptr<WT>* wt_;
     boost::scoped_ptr<boost::thread> checkpointer_;
+    /* Single thread updates with the mutex. */
+    boost::shared_mutex mutex_;
 };

@@ -91,6 +91,12 @@ public:
     }
 
     ResponseCode::type addMap(const std::string& mapName) {
+        std::string mapName_ = mapName;
+        boost::ptr_map<std::string, leveldb::DB>::iterator itr;
+        boost::unique_lock< boost::shared_mutex> writeLock(mutex_);;
+        itr = maps_.find(mapName_);
+        if (itr != maps_.end())
+		return ResponseCode::MapExists;
         leveldb::DB* db;
         leveldb::Options options;
         options.create_if_missing = true;
@@ -103,8 +109,6 @@ public:
             printf("status: %s\n", status.ToString().c_str());
             return ResponseCode::MapExists;
         }
-        std::string mapName_ = mapName;
-        boost::unique_lock< boost::shared_mutex > writeLock(mutex_);;
         maps_.insert(mapName_, db);
         return ResponseCode::Success;
     }
@@ -118,7 +122,7 @@ public:
             return ResponseCode::MapNotFound;
         }
         maps_.erase(itr);
-        DestroyDB(directoryName_ + "/" + mapName, leveldb::Options());
+        //DestroyDB(directoryName_ + "/" + mapName, leveldb::Options());
         return ResponseCode::Success;
     }
 

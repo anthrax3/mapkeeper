@@ -26,7 +26,7 @@ void WTServerHandler::
 initEnv(const string& homeDir)  
 {
     string config;
-    config.assign("create,transactional,verbose=[lsm]");
+    config.assign("create,transactional,cache_size=2GB,sync=false,session_max=120");
     /* TODO: Set a configurable cache size? */
     printf("Opening WT at: %s\n", homeDir.c_str());
     WT_CONNECTION *conn;
@@ -202,6 +202,7 @@ insert(const string& mapName,
        const string& recordBody) 
 {
     initWt();
+    boost::unique_lock< boost::shared_mutex > writeLock(mutex_);;
     WT::ResponseCode dbrc = wt_->get()->insert(mapName, recordName, recordBody);
     if (dbrc == WT::KeyExists) {
         return ResponseCode::RecordExists;
