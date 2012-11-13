@@ -78,6 +78,7 @@ create(const string& tableName, uint32_t pageSizeKb)
     config << ",leaf_page_max=" << pageSizeKb * 1024;
     config << ",lsm_chunk_size=200MB,lsm_merge_threads=1";
     config << ",lsm_bloom_config=(leaf_page_max=10M)";
+    config << ",block_compressor=snappy";
     int rc = sess_->create(
             sess_, Name2Uri(tableName).c_str(), config.str().c_str());
     if (rc == EEXIST)

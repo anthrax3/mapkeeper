@@ -26,7 +26,9 @@ void WTServerHandler::
 initEnv(const string& homeDir)  
 {
     string config;
-    config.assign("create,transactional,cache_size=2GB,sync=false,session_max=120");
+    config.assign(
+        "create,transactional,cache_size=2GB,sync=false,session_max=120"
+	",extensions=[\"libwiredtiger_snappy.so\"]");
     /* TODO: Set a configurable cache size? */
     printf("Opening WT at: %s\n", homeDir.c_str());
     WT_CONNECTION *conn;
