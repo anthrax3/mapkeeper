@@ -21,8 +21,8 @@ using namespace std;
 class WTServerHandler : virtual public MapKeeperIf {
 public:
     WTServerHandler();
-    int init(const string& homeDir, 
-             uint32_t checkpointFrequencyMs);
+    int init(const string& homeDir); 
+    void shutdown();
     ResponseCode::type ping();
     ResponseCode::type addMap(const string& databaseName);
     ResponseCode::type dropMap(const string& databaseName);
@@ -48,11 +48,10 @@ public:
     void initWt();
 
 private:
-    void checkpoint(uint32_t checkpointFrequencyMs);
+    void checkpoint();
     void initEnv(const string& homeDir);
     WT_CONNECTION *conn_;
     boost::thread_specific_ptr<WT>* wt_;
-    boost::scoped_ptr<boost::thread> checkpointer_;
     /* Single thread updates with the mutex. */
     boost::shared_mutex mutex_;
 };

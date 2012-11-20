@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <sstream>
 #include <cerrno>
+#include <signal.h>
 #include <stdio.h>
 #include <boost/thread/tss.hpp>
 #include <boost/thread/thread.hpp>
@@ -21,6 +22,10 @@ using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
 using namespace ::apache::thrift::concurrency;
 using boost::shared_ptr;
+
+/* Signal handler. */
+static void onint(int);
+WTServerHandler *g_handler; /* Make the server accessible to signals. */
 
 void WTServerHandler::
 initEnv(const string& homeDir)  
@@ -70,18 +75,15 @@ int nanoSleep(uint64_t sleepTimeNs)
 }
 
 void WTServerHandler::
-checkpoint(uint32_t checkpointFrequencyMs)
+checkpoint()
 {
     int rc = 0;
     WT_SESSION *sess;
     rc = conn_->open_session(conn_, NULL, NULL, &sess);
-    while (true) {
-        rc = sess->checkpoint(sess, NULL);
-        if (rc != 0) {
-            fprintf(stderr, "WT_SESSION::checkpoint error %s\n",
-                wiredtiger_strerror(rc));
-        }
-        nanoSleep(checkpointFrequencyMs * 1000 *1000);
+    rc = sess->checkpoint(sess, NULL);
+    if (rc != 0) {
+        fprintf(stderr, "WT_SESSION::checkpoint error %s\n",
+            wiredtiger_strerror(rc));
     }
     sess->close(sess, NULL);
 }
@@ -97,17 +99,20 @@ void WTServerHandler::initWt()
 }
 
 int WTServerHandler::
-init(const string& homeDir,
-     uint32_t checkpointFrequencyMs)
+init(const string& homeDir)
 {
     printf("initializing\n");
     initEnv(homeDir);
 
-    /* TODO: why?
-    checkpointer_.reset(new boost::thread(&WTServerHandler::checkpoint, this,
-                                          checkpointFrequencyMs));
-    */
     return ResponseCode::Success;
+}
+
+void WTServerHandler::
+shutdown()
+{
+    printf("Shutting down\n");
+    checkpoint();
+    conn_->close(conn_, NULL);
 }
 
 ResponseCode::type WTServerHandler::
@@ -204,7 +209,7 @@ insert(const string& mapName,
        const string& recordBody) 
 {
     initWt();
-    boost::unique_lock< boost::shared_mutex > writeLock(mutex_);;
+    //boost::unique_lock< boost::shared_mutex > writeLock(mutex_);;
     WT::ResponseCode dbrc = wt_->get()->insert(mapName, recordName, recordBody);
     if (dbrc == WT::KeyExists) {
         return ResponseCode::RecordExists;
@@ -254,16 +259,30 @@ remove(const string& mapName, const string& recordName)
 int main(int argc, char **argv) {
     int port = 9090;
     string homeDir = "data";
-    uint32_t checkpointFrequencyMs = 1000;
+    /* Clean up on signal. */
+    (void)signal(SIGINT, onint);
     shared_ptr<WTServerHandler> handler(new WTServerHandler());
-    handler->init(homeDir, checkpointFrequencyMs);
+    g_handler = handler.get();
+    handler->init(homeDir);
     shared_ptr<TProcessor> processor(new MapKeeperProcessor(handler));
     shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
     shared_ptr<TTransportFactory> transportFactory(
             new TFramedTransportFactory());
     shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
-    TThreadedServer server (
+    TThreadedServer server(
         processor, serverTransport, transportFactory, protocolFactory);
     server.serve();
     return 0;
+}
+
+/*
+ * onint --
+ *	Interrupt signal handler.
+ */
+static void
+onint(int signo)
+{
+    printf("Caught signal, shutting down.\n");
+    g_handler->shutdown();
+    exit(0);
 }

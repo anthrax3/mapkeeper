@@ -76,9 +76,9 @@ create(const string& tableName, uint32_t pageSizeKb)
     config << "key_format=S,value_format=S";
     config << ",internal_page_max=" << pageSizeKb * 1024;
     config << ",leaf_page_max=" << pageSizeKb * 1024;
-    config << ",lsm_chunk_size=200MB,lsm_merge_threads=1";
-    config << ",lsm_bloom_config=(leaf_page_max=10M)";
-    config << ",block_compressor=snappy";
+    config << ",lsm_chunk_size=100MB,lsm_merge_threads=2";
+    config << ",lsm_bloom_config=(leaf_page_max=10M),lsm_bloom_newest=true";
+    config << ",block_compressor=snappy,checksum=false";
     int rc = sess_->create(
             sess_, Name2Uri(tableName).c_str(), config.str().c_str());
     if (rc == EEXIST)
